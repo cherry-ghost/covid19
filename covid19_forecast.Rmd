@@ -1,0 +1,241 @@
+---
+title: "Studying COVID-19 coronavirus outbreak"
+output: pdf_default
+editor_options: 
+  chunk_output_type: inline
+---
+
+Prerequisites:
+```{r}
+library(tidyverse)
+library(forecast)
+library(lubridate)
+```
+
+Download that data maintained by Johns Hopkins University Center for Systems Science and Engineering (JHU CCSE), used also as the source for the dashboard which they provide with ArcGIS.
+```{r}
+input_csv <- paste0("./webdata/time_series_19-covid-Confirmed.csv")
+input_url <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_19-covid-Confirmed.csv"
+
+confirmed_cases_jh <- read_csv(input_url) %>% # read_csv(input_csv) %>% 
+  rename(province = "Province/State", country_region = "Country/Region") %>%
+  pivot_longer(-c(province, country_region, Lat, Long),names_to = "Date",
+               values_to = "cumulative_cases") %>%
+  mutate(Date = as.Date(mdy_hm(paste(Date, "23:59", tz = "UTC")), tz = "Europe/Berlin")) %>% 
+  filter(country_region == "Switzerland") %>% 
+  dplyr::select(-province)
+```
+
+### Time-series forecasting model with exponential smoothing
+Exponential smoothing is a popular forecasting method for short-term predictions. Such forecasts of future values are based on past data whereby the most recent observations are weighted more than less recent observations. As part of this weighting, constants are being smoothed. This is different from the simple moving average method, in which every data point has equal weight in the average calculation. Exponential smoothing introduces the idea of building a forecasted value as the average figure from differently weighted data points for the average calculation.
+
+See: https://johannesmehlem.com/blog/exponential-smoothing-time-series-forecasting-r/
+and: http://www.bcloud.org/e/
+and: https://www.statsandr.com/blog/top-r-resources-on-covid-19-coronavirus/#fn1
+
+```{r}
+ggplot(confirmed_cases_jh, aes(Date, cumulative_cases)) + geom_line() +
+  scale_x_date(date_labels  = "%d.%m.%Y",
+               date_minor_breaks = "1 day",
+               date_breaks = "7 day") + 
+  xlab("Time") +
+  ylab("Confirmed Cases") +
+  labs(title = "Coronavirus COVID-19 outbreak statistics for Switzerland")
+```
+
+## Time-series forecasting model
+See: http://uc-r.github.io/ts_exp_smoothing
+and: https://community.thinkwisesoftware.com/blogs-21/time-series-forecasting-using-r-with-fable-651
+
+To make predictions using data with a trend and seasonality, we turn to the Holt-Winters Seasonal Method. This method can be implemented with an “Additive” structure or a “Multiplicative” structure, where the choice of method depends on the data set. The Additive model is best used when the seasonal trend is of the same magnitude throughout the data set, while the Multiplicative Model is preferred when the magnitude of seasonality changes as time increases.
+
+To apply a Holt’s model where the error and trend were additive and no seasonality exists you would select model = "AAN":
+- error: additive ("A"), multiplicative ("M"), unknown ("Z")
+- trend: none ("N"), additive ("A"), multiplicative ("M"), unknown ("Z")
+- seasonality: none ("N"), additive ("A"), multiplicative ("M"), unknown ("Z")
+
+We used a time-series forecasting model and the exponential smoothing method. The parameters are ets(data, model="AAN", damped=FALSE). The first letter denotes the error type ("A"); the second letter denotes the trend type ("A"); and the third letter denotes the season type. In all cases, "N"=none, "A"=additive, "M"=multiplicative and "Z"=automatically selected.
+
+*Damping Methods:* Damped forecasts use a damping coefficient to more conservatively estimate the predicted trend. Basically, if you believe that your additive or multiplicative trend is or will be slowing down ("flat-lining") in the near future then you are assuming it will dampen.
+
+
+Make a time-series tibble - tsibble - mit the tsibble-packages. Only the last 28 days of data are used.
+
+A good practice in forecasting is to split the original dataset in a training and a validation set. 
+```{r}
+library(tsibble)
+## Make a time-series tibble - tsibble - mit the tsibble-packages.
+# covid_ts <- as_tsibble(confirmed_cases_jh, index = Date)
+# covid_ts <- confirmed_cases_jh %>% 
+#   filter(Date > max(Date) -21) %>% 
+#   as_tsibble(index = Date)
+
+#use xx days for validation
+val_days <- 3
+
+covid_ts <- confirmed_cases_jh %>% 
+  as_tsibble(index = Date) %>% 
+  mutate(type = if_else(Date > max(Date) - lubridate::days(val_days),
+                        "Validation", "Training"))
+# Select training data
+train_data <- covid_ts %>%
+  filter(type == "Training")
+
+# Instead of filtering, we can now also anti-join on train_data
+val_data <- covid_ts %>%
+  anti_join(train_data, by = "Date") 
+```
+
+First use the Holt-Winters method to identify the best fit model by combining the autoplot with the forecaste function.
+```{r}
+## Use the Holt-Winters method to identify the best fit model:
+# autoplot(forecast(covid_ts$cumulative_cases, h = 7))
+```
+
+We can now apply the single exponential smoothing (SES) on our training data. In the fable package SES is a member of a larger family of parameterized exponential smoothing methods. The required parameters are error, trend and season. The SES method does not take trend or seasonality into account so those parameters need to be set to N(one). The error parameter is set to A(dditive).
+
+We fit the SES or ETS(A,N,N) function on our train data before we use the resulting model to forecast the next 7 days.
+
+```{r}
+library(fable)
+fit_ses <- train_data %>% #covid_ts %>%
+  # model(ETS(cumulative_cases ~ error("A") + trend("A") + season("N"),
+  #                                 opt_crit = "mse"))
+  model(auto_ets = ETS(cumulative_cases))
+
+# Model report and smoothing parameters:
+report(fit_ses)
+
+fc_ses <- fit_ses %>% forecast(h = 7)
+```
+
+Now let’s visually inspect the results. For this we will create a plot containing the last 28 days of the confirmed covid-19 cases of which the last xx days are our validation values. It shows both the values fitted on the training data as well as the 7 predicted values. The blue areas around the forecast are so-called confidence intervals. The widest of the two is a 95% confidence interval, which means that you can be 95% sure that the actual future value will be in that interval.
+
+```{r}
+library(ggsci)
+
+covid_ts %>%
+  ggplot(aes(Date, cumulative_cases)) + 
+  geom_line() +
+  autolayer(fc_ses, alpha = 0.6) +
+  geom_line(aes(color = type), alpha = 0.8) +
+  geom_line(aes(y = cumulative_cases, colour = "Forecast"), data = fc_ses) +
+  geom_line(aes(y = .fitted, colour = "Fitted"), data = augment(fit_ses)) +
+  scale_x_date(date_labels  = "%d.%m.",
+               date_minor_breaks = "1 day",
+               date_breaks = "3 day") +
+  xlab("Date") +
+  ylab("Confirmed Cases") +
+  labs(title = "Coronavirus COVID-19: Outbreak statistics and forecast for Switzerland",
+       subtitle = "A time-series forecasting model with exponential smoothing (AAN)") +
+  theme_minimal() +
+  # Zoom into the graph
+  coord_cartesian(xlim = c(ymd(as.Date("2020-02-27")), ymd(max(fc_ses$Date)))) +
+  ggsci::scale_color_aaas()
+```
+
+We used a simple time-series forecasting model (ets: error, trend, and seasonality) provided by the forecast package in R and the exponential smoothing method. The parameters are ets(data, model="AAN", damped=FALSE). Only the last 21 days of data are used. Data are first log-transformed. Einstein reportedly said that compond interest is the most powerful force in the universe and those who do not understand it pay it.
+
+If we have 26% more cases than yesterday, then it doubles every three days. This means a 100-fold increase in patients in 20 days!
+
+
+Trying other modells...
+```{r}
+# Use a more advanced regression model.
+# Fit a linear model with trend and season
+#
+# TSLM is a convenience function that creates
+# and adds the dummy variables to the model.
+# 
+# Because the data_ts index is set to days
+# TSLM will automatically use weekdays as predictors
+
+#use xx days for validation
+val_days <- 2
+
+covid_ts <- confirmed_cases_jh %>% 
+  as_tsibble(index = Date) %>% 
+  mutate(type = if_else(Date > max(Date) - lubridate::days(val_days),
+                        "Validation", "Training"))
+# Select training data
+train_data <- covid_ts %>%
+  filter(type == "Training")
+
+# Instead of filtering, we can now also anti-join on train_data
+val_data <- covid_ts %>%
+  anti_join(train_data, by = "Date") 
+
+# log(x+1) Transform on cumulative_cases:
+fit.tslm <- train_data %>% 
+ # model(TSLM(cumulative_cases ~ trend()))
+  model(lm = TSLM(log(cumulative_cases + 1) ~ trend()))
+#Fit the regression model
+fc.tslm <- fit.tslm %>%
+ #forecast(h = val_days)
+  forecast(h = 7)
+
+# Display the regression table
+report(fit.tslm)
+```
+
+```{r}
+covid_ts %>%
+ ggplot(aes(x=Date, y=cumulative_cases)) +
+ autolayer(fc.tslm, alpha = 0.2) +
+ geom_line( aes(color = type), alpha = 0.8) +
+ geom_line(aes(y = cumulative_cases, colour = "Forecast"), data = fc.tslm) +
+ geom_line(aes(y = .fitted, colour = "Fitted"), data = augment(fit.tslm) %>%
+       filter(Date > max(Date) - months(2))) +
+ theme_minimal() +
+   scale_x_date(date_labels  = "%d.%m.",
+               date_minor_breaks = "1 day",
+               date_breaks = "3 day") +
+ ggsci::scale_color_aaas()
+```
+
+```{r}
+# Fit ARIMA on residuals from the regression model
+fit.res <- augment(fit.tslm) %>%
+  select(Date,.resid) %>%
+  rename(residual = .resid) %>%
+  model( ARIMA(residual, stepwise=F, approximation=F))
+# Forecast residuals
+fc.res <- forecast(fit.res, h=val_days)
+```
+
+```{r}
+# Combine regression and Arima forecast
+fc.combined <-fc.res %>%
+ inner_join(fc.tslm, by=c("Date")) %>%
+ mutate(cumulative_cases=cumulative_cases+residual) %>%
+ as_tsibble() %>%
+ select(Date,cumulative_cases) %>%
+ # Create a new distribution for our confidence intervals
+ mutate(.distribution = dist_normal(mean=cumulative_cases,
+                   sd=purrr::map_dbl(fc.res$.distribution, 
+                          function(.x) .x$sd)
+                   )) %>%
+ mutate(.model = "Regression + Arima(Residuals)") %>%
+ as_fable(cumulative_cases,.distribution)
+
+# Combine fit 
+fit.combined <- augment(fit.tslm) %>% 
+ inner_join(augment(fit.res), by= c("Date")) %>%
+ mutate(.fitted = .fitted.x + .fitted.y) %>%
+ mutate(.model = "Regression + Arima(Residuals)" ) %>%
+ select(.model,Date,.fitted)
+
+# Plot forecast and validation data
+covid_ts %>% filter(Date > max(Date) - months(3)) %>%
+ ggplot(aes(x=Date, y=cumulative_cases)) +
+ autolayer(fc.combined, alpha = 0.4) +
+ geom_line( aes(color = type), alpha = 0.8) +
+ geom_line(aes(y = cumulative_cases, colour = "Forecast"), data = fc.combined) +
+ geom_line(aes(y = .fitted, colour = "Fitted"), data = fit.combined %>%
+       filter(Date > max(Date) - months(2))) +
+ theme_minimal() +
+ scale_x_date(labels = scales::date_format("%b %Y")) +
+ theme(axis.title.x =element_blank()) +
+ ggsci::scale_color_aaas()
+```
+

@@ -1,0 +1,314 @@
+---
+title: "Fitting an SIR model to the COVID-19 to the Switzerland data"
+output:
+  pdf_document
+---
+
+Based on the blog post from 4 February 2020 by Holger K. von Jouanne-Diedrich from Learning Machines ["Epidemiology: How contagious is Novel Coronavirus (2019-nCoV)?"](https://blog.ephorie.de/epidemiology-how-contagious-is-novel-coronavirus-2019-ncov)
+
+They explained a simple epidemiological model, the so-called SIR model, and it's implementation in R. Based on the article and the R-Code I have created my own version of a simple SIR model for Switzerland. The data on the confirmed Covid-19 cases are from the Johns Hopkins University Center for Systems Science and Engineering (JHU CCSE).
+
+See also https://timchurches.github.io/blog/posts/2020-02-18-analysing-covid-19-2019-ncov-outbreak-data-with-r-part-1/
+and code on
+https://github.com/timchurches/blog/blob/master/_posts/2020-02-18-analysing-covid-19-2019-ncov-outbreak-data-with-r-part-1/analysing-covid-19-2019-ncov-outbreak-data-with-r-part-1.Rmd
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(magrittr)
+library(lubridate)
+library(tibble)
+library(ggplot2)
+library(deSolve)
+```
+
+Download that data maintained by Johns Hopkins University Center for Systems Science and Engineering (JHU CCSE), used also as the source for the dashboard which they provide with ArcGIS.
+```{r data_import, message=FALSE, warning=FALSE, tidy=TRUE, echo=TRUE}
+input_csv <- paste0("./webdata/time_series_19-covid-Confirmed.csv")
+input_url <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_19-covid-Confirmed.csv"
+
+confirmed_cases_jh <- read_csv(input_url) %>% # read_csv(input_csv) %>% 
+  rename(province = "Province/State", country_region = "Country/Region") %>%
+  pivot_longer(-c(province, country_region, Lat, Long),names_to = "Date",
+               values_to = "cumulative_cases") %>%
+  mutate(Date = as.Date(mdy_hm(paste(Date, "23:59", tz = "UTC")),
+                        tz = "Europe/Berlin")) %>% 
+  filter(country_region == "Switzerland") %>% 
+  dplyr::select(-province)
+```
+
+The basic idea behind the SIR model of communicable disease outbreaks is that there are three groups of people: those that are healthy but susceptible to the disease (S), the infected (I) and the people who have recovered (R).
+
+To model the dynamics of the outbreak three differential equations are needed, to describe the rates of change in each group, parameterised by beta which controls the transition between S and I and gamma, which controls the transition between I and R.
+
+The expression of those differential equations, with respect to time t, can be done in a R function:
+```{r SIR_function, echo=TRUE}
+SIR <- function(time, state, parameters) {
+    par <- as.list(c(state, parameters))
+    with(par, {
+        dS <- -beta * I * S/N
+        dI <- beta * I * S/N - gamma * I
+        dR <- gamma * I
+        list(c(dS, dI, dR))
+    })
+}
+```
+
+To fit the model to the data two things are needed: a solver for these differential equations and an optimiser to find the optimal values for the two unknown parameters, beta and gamma. The function ode() ("ordinary differential equations") from the "deSolve" package for R is an excellent choice, and to estimate the optimal values for the parameters can be done with the "optim" function built into base R.
+
+We need a value N for the initial uninfected population. The population of Switzerland in 2018 was 8'544'527 people, according to "Bundesamt für Statistik".
+
+Next, we need to create a vector with the daily cumulative incidence for Switzerland. We’ll then compare the predicted incidence from the SIR model fitted to these data with the actual incidence. We also need to initialise the values for S, I and R.
+
+```{r incidence_vector, tidy=TRUE, echo=TRUE}
+# Days to train the model
+sir_start_date <- "2020-03-01"
+#sir_start_date <- "2020-02-26"
+sir_end_date <- "2020-03-16"
+#sir_end_date <- "2020-03-17"
+
+Infected <- confirmed_cases_jh %>%
+  filter(Date >= ymd(sir_start_date), Date <= ymd(sir_end_date)) %>% 
+    pull(cumulative_cases)
+
+# Create an incrementing Day vector the same length as our
+# cases vector
+Day <- 1:(length(Infected))
+
+# Ständige Wohnbevölkerung der CH 2018 (Quelle: Bundesamt für Statistik)
+N <- 8544527
+# now specify initial values for S, I and R
+init <- c(S = N - Infected[1], I = Infected[1], R = 0)
+```
+
+Then we need to define a function to calculate the RSS given a set of values for beta and gamma.
+```{r define_RSS_function, tidy=TRUE, echo=TRUE}
+# define a function to calculate the residual sum of squares
+# (RSS), passing in parameters beta and gamma that are to be
+# optimised for the best fit to the incidence data
+RSS <- function(parameters) {
+    names(parameters) <- c("beta", "gamma")
+    out <- ode(y = init, times = Day, func = SIR, parms = parameters)
+    fit <- out[, 3]
+    sum((Infected - fit)^2)
+}
+```
+
+Finally, we can fit the SIR model to our data by finding the values for beta and gamma that minimise the residual sum of squares between the observed cumulative incidence and the predicted cumulative incidence. We also need to check that our model has converged, as indicated by the message shown below:
+```{r fit_SIR_model, tidy=TRUE, echo=TRUE}
+# now find the values of beta and gamma that give the
+# smallest RSS, which represents the best fit to the data.
+# Start with values of 0.5 for each, and constrain them to
+# the interval 0 to 1.0
+Opt <- optim(c(0.5, 0.5), RSS, method = "L-BFGS-B", lower = c(0, 
+    0), upper = c(1, 1))
+
+# check for convergence
+Opt$message
+```
+
+Convergence is confirmed. Now we can examine the fitted values for beta and gamma.
+```{r SIR_model_fit_examine, echo=TRUE}
+Opt_par <- setNames(Opt$par, c("beta", "gamma"))
+Opt_par
+```
+
+Let’s use those values to get the fitted numbers of people in each compartment of our SIR model and compare those fitted values with the observed data:
+```{r SIR_model_plot_fitted_data, echo=TRUE, tidy=TRUE, message=FALSE}
+# time in days for predictions
+# t <- 1:as.integer(today() - ymd(sir_start_date))
+t <- 1:as.integer(today() - ymd(sir_start_date) + 1)
+
+# get the fitted values from our SIR model
+fitted_cumulative_incidence <- data.frame(ode(y = init, times = t, 
+    func = SIR, parms = Opt_par))
+# add a Date column and join the observed incidence data
+fitted_cumulative_incidence <- fitted_cumulative_incidence %>% 
+  mutate(Date = ymd(sir_start_date) + days(t - 1)) %>% 
+  left_join(confirmed_cases_jh, by = "Date") %>% ## NEU
+  mutate(training = ifelse(Date > sir_end_date, "No", "Yes"))
+
+# plot the data
+fitted_cumulative_incidence %>% filter(Date <= sir_end_date) %>% 
+    ggplot(aes(x = Date)) + geom_line(aes(y = I), colour = "red") + 
+    geom_point(aes(y = cumulative_cases), colour = "darkorange3") + 
+    labs(y = "Cumulative incidence",
+         title = "COVID-19 fitted vs observed cumulative incidence for Switzerland",
+         subtitle = "(red=fitted incidence from SIR model, orange=observed incidence)") +
+  theme_minimal()
+```
+
+We can now extract some interesting statistics. One important number is the so-called basic reproduction number (also basic reproduction ratio) R_0 (pronounced “R naught”) which basically shows how many healthy people get infected by a sick person on average
+```{r SIR_model_R0, echo=FALSE, tidy=TRUE}
+R0 <- setNames(Opt_par["beta"] / Opt_par["gamma"], "R0")
+R0
+```
+
+An R0 of around 2 is the values calculated by others for COVID-19. A number of 2 is also the number many researchers and the WHO give and which is around the same range of SARS, Influenza.
+
+
+### Using the SIR model for Switzerland to make predictions
+
+An obvious next step is to use our fitted SIR model to make predictions about the future course of the outbreak. However, caution is required, because the SIR model assumes a fixed reproduction number, but if public health interventions have been implemented, such as quarantining of cases, contact tracing and isolation of those contacts, and general restrictions on social mixing, then the effective reproduction number Re will be dynamic and should fall as those interventions are progressively implemented, to values considerably less than the basic reproduction number R0, which reflects the behaviour of the virus at the beginning of an epidemic before any response has been implemented.
+
+So let’s use our SIR model, fitted to the first 15 days of data, to extrapolate out to the current date, and compare that against the observed values:
+```{r SIR_model_plot_extrapolated, echo=FALSE, tidy=TRUE, message=FALSE, warning=FALSE}
+fitted_cumulative_incidence %>%
+  ggplot(aes(x=Date)) + geom_line(aes(y=I), colour="red") +
+  # geom_point(aes(y=cumulative_cases), colour="orange") +
+  geom_point(aes(y=cumulative_cases, colour=factor(training))) +
+  scale_colour_manual(name="Training Data",  
+                      values = c("Yes"="darkorange3", "No"="orange")) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(y="Cumulative incidence", 
+       title="COVID-19 fitted vs observed cumulative incidence, Switzerland",
+       subtitle="(red=fitted incidence from SIR model, orange=observed incidence)") +
+  theme_minimal()
+```
+
+## Using our model to let the outbreak "run its course" without intervention
+
+It is instructive to use our model fitted to the first 15 days of available data on lab-confirmed cases in Hubei province, to see what would happen if the outbreak were left to run its course, without public health interventions.
+
+```{r SIR_model_plot_no_intervention, echo=TRUE, tidy=TRUE, message=FALSE, warning=FALSE}
+# time in days for predictions
+t <- 1:70
+
+# get the fitted values from our SIR model
+fitted_cumulative_incidence <- data.frame(ode(y = init, times = t,
+                                              func = SIR, parms = Opt_par))
+# add a Date column and join the observed incidence data
+fitted_cumulative_incidence <- fitted_cumulative_incidence %>%
+  mutate(Date = ymd(sir_start_date) + days(t - 1)) %>%
+  left_join(confirmed_cases_jh, by = "Date") %>% ## NEU
+  mutate(training = ifelse(Date > sir_end_date, "No", "Yes"))
+
+# plot the data
+fitted_cumulative_incidence %>%
+  ggplot(aes(x=Date)) + geom_line(aes(y=I, colour="red")) +
+  geom_line(aes(y=S, colour="black")) +
+  geom_line(aes(y=R, colour="green")) +
+  geom_point(aes(y=cumulative_cases, colour="orange")) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(y="Persons", 
+       title="COVID-19 fitted vs observed cumulative incidence, Switzerland") +
+  scale_colour_manual(name = '', 
+                      values =c('red'='red', 'black'='black', 'green'='green',
+                                'orange'='orange'), 
+                      labels = c('Susceptible', 'Recovered', 'Observed incidence',
+                                 'Infectious')) +
+  theme_bw()
+```
+
+It is easier to see what is going on if we use a log scale:
+
+```{r SIR_model_plot_no_intervention_log, echo=FALSE, tidy=TRUE, message=FALSE, warning=FALSE}
+# plot the data
+fitted_cumulative_incidence %>%
+  ggplot(aes(x=Date)) + geom_line(aes(y=I, colour="red")) +
+  geom_line(aes(y=S, colour="black")) +
+  geom_line(aes(y=R, colour="green")) +
+  geom_line(aes(y=I*0.05, colour="red4")) +
+  geom_point(aes(y=cumulative_cases, colour="orange")) +
+  # Plätze in der Intensivpflege
+  geom_hline(yintercept=1500, linetype = "dotdash", colour = "gray40") +
+  annotate(geom='text', x=ymd("2020-04-25"),y=600, colour = "gray40",
+           size = 3.5, label="Intensive Care Capacity") +
+  scale_y_log10(labels = scales::comma,
+                breaks = scales::trans_breaks("log10", function(x) 10^x)) +
+  annotation_logticks(sides="l") +
+  labs(y="Persons", 
+       title="COVID-19 fitted vs observed cumulative incidence, Switzerland") + 
+  scale_colour_manual(name = '', 
+                      values =c('red'='red', 'black'='black', 'green'='green',
+                                'red4'='red4',
+                                'orange'='orange'), 
+                      labels = c('Susceptible', 'Recovered', 'Observed incidence',
+                                 'Infectious',
+                                 'Infectious - Higher Risk (5%)'
+                                 )) +
+  theme_bw()
+## To DO:
+## - Bundesweite Massnahmen auf Zeitachse eintragen: 1. Empfehlung BR, Lockdown, evt Ausgangssperre, ...
+## - Risikogruppe und nicht Risikogruppe anhand der "Infectious" Kurve separieren
+## - Allenfalls Schweizerbevölkerung eintragen (N)
+## - Infectious in Infectious ohne Massnahmen umbenennen
+```
+
+All of this is preliminary and hopefully (probably!) false. By playing aroud with the model, one will see hat the fitted parameters are far from stable. 
+Further, that prediction is without any decisive public health intervention to limit the spread of COVID-19.
+Those are the modelled numbers and nobody knows whether they are correct while I hope they are not. The numbers used to train the model are from the last day before the lockdown in Switzerland and hopefully those measures will prove effective and the actual numbers will turn out to be much lower.
+
+## Ascertainment rates
+
+So far, we have assumed that the counts of lab-confirmed cases represent all the cases that are infectious. This is unlikely to be true -- typically only a proportion of actual cases are detected or found or sent for testing. This proportion is known as the _ascertainment rate_. The ascertainment rate is likely to change during the course of an outbreak, particularly if surveillance and screening efforts are increased, or if case definitions are changed. For the sake of simplicity, let's see what happens if we assume a fixed ascertainment rate of 20%. [Nishiura _et al_.](https://doi.org/10.3390/jcm9020419).
+If we apply that, thus inflating the number of incident cases by a factor of 5, and refit the model, we get the following results.
+
+```{r SIR_with_ascertianment_rate, tidy=TRUE}
+
+Infected <- confirmed_cases_jh %>%
+  filter(Date >= ymd(sir_start_date), Date <= sir_end_date) %>% 
+    pull(cumulative_cases)
+
+# Apply a fixed 20% ascertainment rate
+Infected <- Infected * 5
+
+# Create an incrementing Day vector the same length as our cases vector
+Day <- 1:(length(Infected))
+
+# now specify initial values for S, I and R
+init <- c(S = N-Infected[1], I = Infected[1], R = 0)
+
+RSS <- function(parameters) {
+  names(parameters) <- c("beta", "gamma")
+  out <- ode(y = init, times = Day, func = SIR, parms = parameters)
+  fit <- out[ , 3]
+  sum((Infected - fit)^2)
+}
+
+Opt <- optim(c(0.5, 0.5), RSS, 
+             method = "L-BFGS-B", 
+             lower = c(0, 0), upper = c(1, 1)) 
+
+# check for convergence
+Opt$message
+Opt_par <- setNames(Opt$par, c("beta", "gamma"))
+Opt_par
+R0 <- setNames(Opt_par["beta"] / Opt_par["gamma"], "R0")
+R0
+```
+
+Note that these fitted parameters are (almost) the same as the ones we got above, without an ascertainment rate adjustment. Let's look at the fitted values.
+
+```{r SIR_model_plot_no_intervention_ascertainment_adjustment, tidy=TRUE, message=FALSE, warning=FALSE}
+# time in days for predictions
+t <- 1:70
+
+# get the fitted values from our SIR model
+fitted_cumulative_incidence_as <- data.frame(ode(y = init, times = t, 
+    func = SIR, parms = Opt_par))
+# add a Date column and join the observed incidence data
+fitted_cumulative_incidence_as <- fitted_cumulative_incidence_as %>% 
+  mutate(Date = ymd(sir_start_date) + days(t - 1)) %>% 
+  left_join(confirmed_cases_jh, by = "Date")
+
+# plot the data
+fitted_cumulative_incidence_as %>%
+  ggplot(aes(x=Date)) + geom_line(aes(y=I, colour="red")) +
+  geom_line(aes(y=S, colour="black")) +
+  geom_line(aes(y=R, colour="green")) +
+  geom_point(aes(y=cumulative_cases*5, colour="orange")) +
+  scale_y_log10(labels = scales::comma,
+                breaks = scales::trans_breaks("log10", function(x) 10^x)) +
+  #coord_trans(y = "log10") +
+  annotation_logticks(sides="l") +
+  labs(y="Persons", 
+       title="COVID-19 fitted vs observed cumulative incidence, Switzerland",
+       subtitle = "Adjusted for 20% ascertainment") +
+  scale_colour_manual(name = '', 
+                      values =c('red'='red', 'black'='black', 'green'='green',
+                                'orange'='orange'), 
+                      labels = c('Susceptible', 'Recovered', 'Observed incidence',
+                                 'Infectious')) +
+  theme_bw()
+```
+

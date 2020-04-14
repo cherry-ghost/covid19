@@ -23,20 +23,95 @@ library(ggplot2)
 library(deSolve)
 ```
 
-Download that data maintained by Johns Hopkins University Center for Systems Science and Engineering (JHU CCSE), used also as the source for the dashboard which they provide with ArcGIS.
-https://github.com/CSSEGISandData/COVID-19
-```{r data_import, message=FALSE, warning=FALSE, tidy=TRUE, echo=TRUE}
-input_url <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_confirmed_global.csv"
+Data from "Fachstelle Open Government Data des Kantons Zürich"
+COVID-19 Cases communicated by Swiss Cantons and Principality of Liechtenstein (FL). One CSV per Canton each:
+https://github.com/openZH/covid_19
 
-confirmed_cases_jh <- read_csv(input_url) %>%
-  rename(province = "Province/State", country_region = "Country/Region") %>%
-  pivot_longer(-c(province, country_region, Lat, Long),names_to = "Date",
-               values_to = "cumulative_cases") %>%
-  mutate(Date = as.Date(mdy_hm(paste(Date, "23:59", tz = "UTC")),
-                        tz = "Europe/Berlin")) %>% 
-  filter(country_region == "Switzerland") %>% 
-  dplyr::select(-province)
+Update: There is a new automated merged file available here:
+https://github.com/openZH/covid_19/blob/master/COVID19_Fallzahlen_CH_total.csv
+```{r data_import_per_Canton, message=FALSE, warning=FALSE, include=FALSE}
+# library("glue")
+# library("tidyverse")
+# library(sf)
+# 
+# ## Creates a List of all Canton URLs
+# cantons <- c('AG', 'AI', 'AR', 'BE', 'BL', 'BS', 'FR', 'GE', 'GL', 'GR', 'JU', 'LU', 'NE',
+#          'NW', 'OW', 'SG', 'SH', 'SO', 'SZ', 'TG', 'TI', 'UR', 'VD', 'VS', 'ZG', 'ZH')
+# 
+# ogd_path <- "https://raw.githubusercontent.com/openZH/covid_19/master/fallzahlen_kanton_total_csv/"
+# 
+# total_urls <- map(cantons,~stringr::str_interp(
+#   "${ogd_path}/COVID19_Fallzahlen_Kanton_${.x}_total.csv"))
+# 
+# all_cantons <- map(total_urls, read_csv)
+# 
+# total_cantons <- bind_rows(all_cantons)
+# 
+# # # Creates a String of the URL Addresses
+# #  urls <-
+# #   tidyr::expand_grid(knt) %>%
+# #   glue_data("https://raw.githubusercontent.com/openZH/covid_19/master/fallzahlen_kanton_total_csv/COVID19_Fallzahlen_Kanton_{knt}_total.csv")
+# # 
+# # # Creates Names for the PDF Files
+# # csv_names <-
+# #   tidyr::expand_grid(knt) %>%
+# #   glue_data("Data/COVID19_Fallzahlen_Kanton_{knt}.csv")
+# # 
+# # ## Downloads the csv Files Using purrr
+# # walk2(urls, csv_names, download.file, mode = "wb")
+# # 
+# # ## Merge the Cantons csv into one data frame
+# # csv_dir <- "./Data/"
+# # csv_files <- fs::dir_ls(csv_dir, regexp = "\\.csv$")
+# # # read all of the files in the directory
+# # covid_data_knt <- csv_files %>%
+# #   map_dfr(read_csv) %>%
+# #   # removing extra columns for GE
+# #   select(-c(ncumul_ICF:TotalCured))
+# 
+# covid_daily <- total_cantons %>%
+#   group_by(date) %>%
+#   summarize(cumulative_cases = sum(ncumul_conf)) %>%
+#   # Fill missing values with previous day's number
+#   fill(cumulative_cases, .direction = "down") %>%
+#   # Now there are only missing values at the start of the series, set them to zero
+#   mutate(cumulative_cases = replace_na(cumulative_cases, 0)) %>%
+#   # use stats until yesterday
+#   filter(ymd(date) < today())
 ```
+
+```{r}
+input_url <- 'https://raw.githubusercontent.com/openZH/covid_19/master/COVID19_Fallzahlen_CH_total.csv'
+
+## --- Zeitreihe für jeden Kanton einzeln: Da nicht jeder Kanton jeden Tag die Cases gemeldet hat, müssen die Fälle an die Daten gejoint werden und für jeden Tag der aktuelle Wert oder jener vom Vortag verwendet werden.
+
+covid_knt <- read_csv(input_url) %>%
+ arrange(abbreviation_canton_and_fl, date)
+
+# get the whole time sequence as a tibble for join later
+time_sequence <- tibble(date = seq(ymd(min(covid_knt$date)), ymd(max(covid_knt$date)),
+                                   by = '1 day'))
+
+covid_knt <- covid_knt %>%
+  dplyr::select(date, abbreviation_canton_and_fl:ncumul_deceased) %>% 
+  group_by(abbreviation_canton_and_fl) %>% 
+  # ungroup the dataframe
+  group_split() %>% 
+  # join cases to whole time sequence, per each canton
+  map_dfr(~left_join(x = time_sequence, y = ., by ="date") %>% 
+            # Complete contons abbreviation
+            fill(abbreviation_canton_and_fl, .direction = "down") %>% 
+            fill(abbreviation_canton_and_fl, .direction = "up") %>% 
+            # Fill missing values with previous day's number
+            fill(ncumul_conf, .direction = "down") %>% 
+            # Now there're only missing values at the start, set them to zero
+            mutate(ncumul_conf = replace_na(ncumul_conf, 0)))
+
+covid_ch_total <- covid_knt %>% 
+  group_by(date) %>% 
+  summarize(cumulative_cases = sum(ncumul_conf)) #%>% filter(ymd(date) < today())
+```
+
 
 The basic idea behind the SIR model of communicable disease outbreaks is that there are three groups of people: those that are healthy but susceptible to the disease (S), the infected (I) and the people who have recovered (R).
 
@@ -63,13 +138,13 @@ Next, we need to create a vector with the daily cumulative incidence for Switzer
 
 ```{r incidence_vector, tidy=TRUE, echo=TRUE}
 # Days to train the model
-sir_start_date <- "2020-03-01"
-#sir_start_date <- "2020-02-26"
+# sir_start_date <- "2020-03-01"
+# sir_end_date <- "2020-03-16"
+sir_start_date <- "2020-02-25"
 sir_end_date <- "2020-03-16"
-#sir_end_date <- "2020-03-17"
 
-Infected <- confirmed_cases_jh %>%
-  filter(Date >= ymd(sir_start_date), Date <= ymd(sir_end_date)) %>% 
+Infected <- covid_ch_total %>%
+  filter(date >= ymd(sir_start_date), date <= ymd(sir_end_date)) %>% 
     pull(cumulative_cases)
 
 # Create an incrementing Day vector the same length as our
@@ -125,13 +200,13 @@ fitted_cumulative_incidence <- data.frame(ode(y = init, times = t,
     func = SIR, parms = Opt_par))
 # add a Date column and join the observed incidence data
 fitted_cumulative_incidence <- fitted_cumulative_incidence %>% 
-  mutate(Date = ymd(sir_start_date) + days(t - 1)) %>% 
-  left_join(confirmed_cases_jh, by = "Date") %>% ## NEU
-  mutate(training = ifelse(Date > sir_end_date, "No", "Yes"))
+  mutate(date = ymd(sir_start_date) + days(t - 1)) %>% 
+  left_join(covid_ch_total, by = "date") %>% ## NEU
+  mutate(training = ifelse(date > sir_end_date, "No", "Yes"))
 
 # plot the data
-fitted_cumulative_incidence %>% filter(Date <= sir_end_date) %>% 
-    ggplot(aes(x = Date)) + geom_line(aes(y = I), colour = "red") + 
+fitted_cumulative_incidence %>% filter(date <= sir_end_date) %>% 
+    ggplot(aes(x = date)) + geom_line(aes(y = I), colour = "red") + 
     geom_point(aes(y = cumulative_cases), colour = "darkorange3") + 
     labs(y = "Cumulative incidence",
          title = "COVID-19 fitted vs observed cumulative incidence for Switzerland",
@@ -155,7 +230,7 @@ An obvious next step is to use our fitted SIR model to make predictions about th
 So let’s use our SIR model, fitted to the first 15 days of data, to extrapolate out to the current date, and compare that against the observed values:
 ```{r SIR_model_plot_extrapolated, echo=FALSE, tidy=TRUE, message=FALSE, warning=FALSE}
 fitted_cumulative_incidence %>%
-  ggplot(aes(x=Date)) + geom_line(aes(y=I), colour="red") +
+  ggplot(aes(x=date)) + geom_line(aes(y=I), colour="red") +
   # geom_point(aes(y=cumulative_cases), colour="orange") +
   geom_point(aes(y=cumulative_cases, colour=factor(training))) +
   scale_colour_manual(name="Training Data",  
@@ -180,13 +255,13 @@ fitted_cumulative_incidence <- data.frame(ode(y = init, times = t,
                                               func = SIR, parms = Opt_par))
 # add a Date column and join the observed incidence data
 fitted_cumulative_incidence <- fitted_cumulative_incidence %>%
-  mutate(Date = ymd(sir_start_date) + days(t - 1)) %>%
-  left_join(confirmed_cases_jh, by = "Date") %>% ## NEU
-  mutate(training = ifelse(Date > sir_end_date, "No", "Yes"))
+  mutate(date = ymd(sir_start_date) + days(t - 1)) %>%
+  left_join(covid_ch_total, by = "date") %>% ## NEU
+  mutate(training = ifelse(date > sir_end_date, "No", "Yes"))
 
 # plot the data
 fitted_cumulative_incidence %>%
-  ggplot(aes(x=Date)) + geom_line(aes(y=I, colour="red")) +
+  ggplot(aes(x=date)) + geom_line(aes(y=I, colour="red")) +
   geom_line(aes(y=S, colour="black")) +
   geom_line(aes(y=R, colour="green")) +
   geom_point(aes(y=cumulative_cases, colour="orange")) +
@@ -204,16 +279,18 @@ fitted_cumulative_incidence %>%
 It is easier to see what is going on if we use a log scale:
 
 ```{r SIR_model_plot_no_intervention_log, echo=FALSE, tidy=TRUE, message=FALSE, warning=FALSE}
+t <- 1:70
+
 # plot the data
 fitted_cumulative_incidence %>%
-  ggplot(aes(x=Date)) + geom_line(aes(y=I, colour="red")) +
+  ggplot(aes(x=date)) + geom_line(aes(y=I, colour="red")) +
   geom_line(aes(y=S, colour="black")) +
   geom_line(aes(y=R, colour="green")) +
   geom_line(aes(y=I*0.1, colour="red4")) +
   geom_point(aes(y=cumulative_cases, colour="orange")) +
   # Plätze in der Intensivpflege
   geom_hline(yintercept=1500, linetype = "dotdash", colour = "gray40") +
-  annotate(geom='text', x=ymd("2020-04-25"),y=600, colour = "gray40",
+  annotate(geom='text', x=ymd("2020-04-20"),y=600, colour = "gray40",
            size = 3.5, label="Intensive Care Capacity") +
   scale_y_log10(labels = scales::comma,
                 breaks = scales::trans_breaks("log10", function(x) 10^x)) +
@@ -228,11 +305,6 @@ fitted_cumulative_incidence %>%
                                  'Infectious', 'Requires Hospitalisation\n(10% of Infectious)'
                                  )) +
   theme_bw()
-## To DO:
-## - Bundesweite Massnahmen auf Zeitachse eintragen: 1. Empfehlung BR, Lockdown, evt Ausgangssperre, ...
-## - Risikogruppe und nicht Risikogruppe anhand der "Infectious" Kurve separieren
-## - Allenfalls Schweizerbevölkerung eintragen (N)
-## - Infectious in Infectious ohne Massnahmen umbenennen
 ```
 
 All of this is preliminary and hopefully (probably!) false. By playing aroud with the model, one will see hat the fitted parameters are far from stable. 
@@ -246,8 +318,8 @@ If we apply that, thus inflating the number of incident cases by a factor of 5, 
 
 ```{r SIR_with_ascertianment_rate, tidy=TRUE}
 
-Infected <- confirmed_cases_jh %>%
-  filter(Date >= ymd(sir_start_date), Date <= sir_end_date) %>% 
+Infected <- covid_ch_total %>%
+  filter(date >= ymd(sir_start_date), date <= sir_end_date) %>% 
     pull(cumulative_cases)
 
 # Apply a fixed 20% ascertainment rate
@@ -289,12 +361,12 @@ fitted_cumulative_incidence_as <- data.frame(ode(y = init, times = t,
     func = SIR, parms = Opt_par))
 # add a Date column and join the observed incidence data
 fitted_cumulative_incidence_as <- fitted_cumulative_incidence_as %>% 
-  mutate(Date = ymd(sir_start_date) + days(t - 1)) %>% 
-  left_join(confirmed_cases_jh, by = "Date")
+  mutate(date = ymd(sir_start_date) + days(t - 1)) %>% 
+  left_join(covid_ch_total, by = "date")
 
 # plot the data
 fitted_cumulative_incidence_as %>%
-  ggplot(aes(x=Date)) + geom_line(aes(y=I, colour="red")) +
+  ggplot(aes(x=date)) + geom_line(aes(y=I, colour="red")) +
   geom_line(aes(y=S, colour="black")) +
   geom_line(aes(y=R, colour="green")) +
   geom_point(aes(y=cumulative_cases*5, colour="orange")) +

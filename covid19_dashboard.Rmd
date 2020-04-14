@@ -1,0 +1,691 @@
+---
+title: "COVID-19 Switzerland - Statistics and Models"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: row
+    vertical_layout: fill
+    theme: bootstrap
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(tidyverse)
+library(magrittr)
+library(lubridate)
+library(tibble)
+library(ggplot2)
+library(deSolve)
+
+# Set colors
+# https://www.w3.org/TR/css-color-3/#svg-color
+confirmed_color <- "purple"
+active_color <- "#1f77b4"
+recovered_color <- "forestgreen"
+death_color <- "red"
+```
+
+```{r}
+input_url <- 'https://raw.githubusercontent.com/openZH/covid_19/master/COVID19_Fallzahlen_CH_total.csv'
+
+## --- Zeitreihe für jeden Kanton einzeln: Da nicht jeder Kanton jeden Tag die Cases gemeldet hat, müssen die Fälle an die Daten gejoint werden und für jeden Tag der aktuelle Wert oder jener vom Vortag verwendet werden.
+
+covid_knt <- read_csv(input_url) %>%
+ arrange(abbreviation_canton_and_fl, date)
+
+# get the whole time sequence as a tibble for join later
+time_sequence <- tibble(date = seq(ymd(min(covid_knt$date)), ymd(max(covid_knt$date)),
+                                   by = '1 day'))
+
+covid_knt <- covid_knt %>%
+  dplyr::select(date, abbreviation_canton_and_fl:ncumul_deceased) %>% 
+  group_by(abbreviation_canton_and_fl) %>% 
+  # ungroup the dataframe
+  group_split() %>% 
+  # join cases to whole time sequence, per each canton
+  map_dfr(~left_join(x = time_sequence, y = ., by ="date") %>% 
+            # Complete contons abbreviation
+            fill(abbreviation_canton_and_fl, .direction = "down") %>% 
+            fill(abbreviation_canton_and_fl, .direction = "up") %>% 
+            # Fill missing values with previous day's number
+            fill(ncumul_conf, .direction = "down") %>% 
+            fill(ncumul_hosp, .direction = "down") %>% 
+            fill(ncumul_released, .direction = "down") %>% 
+            fill(ncumul_deceased, .direction = "down") %>% 
+            # Now there're only missing values at the start, set them to zero
+            mutate(ncumul_conf = replace_na(ncumul_conf, 0),
+                   ncumul_hosp = replace_na(ncumul_hosp, 0),
+                   ncumul_released = replace_na(ncumul_released, 0),
+                   ncumul_deceased = replace_na(ncumul_deceased, 0)))
+
+covid_ch <- covid_knt %>% 
+  group_by(date) %>% 
+  summarize(cumulative_cases = sum(ncumul_conf),
+            currently_hosp = sum(ncumul_hosp),
+            total_released = sum(ncumul_released),
+            total_fatalities = sum(ncumul_deceased)) #%>% filter(ymd(date) < today())
+```
+
+Summary
+=======================================================================
+
+Row {data-width=400}
+-----------------------------------------------------------------------
+
+### Confirmed Cases
+
+```{r}
+ind <- which(covid_ch$date == today())
+valueBox(
+  value = format(covid_ch$cumulative_cases[ind],
+                       big.mark = "'"),
+  caption = "Total confirmed cases",
+  icon = "fas fa-user-md",
+  color = confirmed_color)
+```
+
+### Currently Hospitalized
+
+```{r}
+valueBox(
+  value = format(covid_ch$currently_hosp[ind],
+                       big.mark = "'"),
+    caption = "Currently Hospitalized",
+    icon = "fas fa-ambulance",
+    color = active_color)
+```
+
+### Total Released
+
+```{r}
+valueBox(
+  value = format(covid_ch$total_released[ind],
+                       big.mark = "'"),
+    caption = "Total Released",
+    icon = "fas fa-heartbeat",
+    color = recovered_color)
+```
+
+### Fatalities
+
+```{r}
+valueBox(
+  value = format(covid_ch$total_fatalities[ind],
+                       big.mark = "'"),
+    caption = "Fatalities",
+    icon = "fas fa-heart-broken",
+    color = death_color)
+```
+
+
+Row
+-----------------------------------------------------------------------
+
+### **Daily cumulative cases by type**
+
+```{r}
+plotly::plot_ly(data = covid_ch) %>%
+  plotly::add_trace(
+    x = ~date,
+    y = ~cumulative_cases,
+    type = "scatter",
+    mode = "lines+markers",
+    name = "Confirmed",
+    line = list(color = confirmed_color),
+    marker = list(color = confirmed_color)
+  ) %>%
+   plotly::add_trace(
+    x = ~date,
+    y = ~currently_hosp,
+    type = "scatter",
+    mode = "lines+markers",
+    name = "Hospitalized",
+    line = list(color = active_color),
+    marker = list(color = active_color)
+  ) %>%
+     plotly::add_trace(
+    x = ~date,
+    # y = ~active_cum,
+    y = ~total_released,
+    type = "scatter",
+    mode = "lines+markers",
+    # name = "Active",
+    name = "Recovered",
+    line = list(color = recovered_color),
+    marker = list(color = recovered_color)
+  ) %>%
+  plotly::add_trace(
+    x = ~date,
+    y = ~total_fatalities,
+    type = "scatter",
+    mode = "lines+markers",
+    name = "Fatalities",
+    line = list(color = death_color),
+    marker = list(color = death_color)
+  ) %>%
+  plotly::add_annotations(
+    x = as.Date("2020-02-25"),
+    y = 1,
+    text = paste("First case"),
+    xref = "x",
+    yref = "y",
+    arrowhead = 5,
+    arrowhead = 3,
+    arrowsize = 1,
+    showarrow = TRUE,
+    ax = -10,
+    ay = -90
+  ) %>%
+  plotly::add_annotations(
+    x = as.Date("2020-03-17"),
+    y = 14,
+    text = paste(
+      "New containment",
+      "",
+      "measures"
+    ),
+    xref = "x",
+    yref = "y",
+    arrowhead = 5,
+    arrowhead = 3,
+    arrowsize = 1,
+    showarrow = TRUE,
+    ax = -10,
+    ay = -90
+  ) %>%
+  plotly::layout(
+    title = "",
+    yaxis = list(title = "Cumulative number of cases"),
+    xaxis = list(title = "Date"),
+    legend = list(x = 0.1, y = 0.9),
+    hovermode = "compare"
+  )
+```
+
+New Cases per Day
+=======================================================================
+
+Row {data-width=400}
+-----------------------------------------------------------------------
+
+### Confirmed Cases
+
+```{r}
+covid_ch <- covid_ch %>% 
+  mutate(incidence_conf = cumulative_cases - lag(cumulative_cases),
+         incidence_hosp = currently_hosp - lag(currently_hosp),
+         incidence_released = total_released  - lag(total_released ),
+         incidence_fatalities = total_fatalities - lag(total_fatalities)) %>% 
+  replace(is.na(.), 0)
+
+valueBox(
+  value = format(covid_ch$incidence_conf[ind],
+                       big.mark = "'"),
+  caption = "New confirmed cases today",
+  icon = "fas fa-user-md",
+  color = confirmed_color)
+```
+
+### Currently Hospitalized
+
+```{r}
+valueBox(
+  value = format(covid_ch$incidence_hosp[ind],
+                 big.mark = "'"),
+  # Reported number of hospitalised patients on date
+  caption = "Hospitalized today",
+  icon = "fas fa-ambulance",
+  color = active_color)
+```
+
+### Total Released
+
+```{r}
+valueBox(
+  value = format(covid_ch$incidence_released[ind],
+                       big.mark = "'"),
+    caption = "New Released today",
+    icon = "fas fa-heartbeat",
+    color = recovered_color)
+```
+
+### Fatalities
+
+```{r}
+valueBox(
+  value = format(covid_ch$incidence_fatalities[ind],
+                       big.mark = "'"),
+    caption = "New Fatalities today",
+    icon = "fas fa-heart-broken",
+    color = death_color)
+```
+
+
+Row
+-----------------------------------------------------------------------
+
+### **Daily Incremental Incidence (Count of New Cases per Day)**
+
+```{r}
+# library(hrbrthemes)
+
+## melted dataframe for ggplot
+library(reshape2)
+melt_inc <- covid_ch %>%
+  dplyr::select(date, incidence_conf:incidence_fatalities)
+
+melt_inc <- melt(melt_inc, 'date')
+
+## plot epi curve
+epi_plot <- ggplot(melt_inc) +
+  geom_bar(aes(x = date, y = value, fill = factor(variable)), stat='identity') +
+  scale_fill_manual(name = "Cases",
+                    values=c(confirmed_color, active_color,
+                             recovered_color, death_color),
+                    labels = c("Confirmed", "Hospitalized", "Released", "Fatalities")) +
+  xlab("") +
+  ylab("Count of New Cases per Day") +
+  facet_grid(rows = vars(variable)) +
+  theme_minimal() +# theme_ipsum()
+  theme(strip.text = element_blank())
+
+## ggplot to plotly
+library(plotly)
+fig <- ggplotly(epi_plot)
+# it looks like ggplotly doesn't care what the scale_fill_manual labels are and just pulls the fill factor groups as names. So manually edit the labels in the ggplotly data:
+fig$x$data[[1]]$name <- "Confirmed"
+fig$x$data[[2]]$name <- "Hospitalized"
+fig$x$data[[3]]$name <- "Released"
+fig$x$data[[4]]$name <- "Fatalities"
+fig
+```
+
+Epidemic Curves per Canton
+=======================================================================
+
+Row {data-width=400}
+-----------------------------------------------------------------------
+
+### **Confirmed cases of COVID-19 per Canton of Switzerland - Daily Incremental Incidence (Count of New Cases per Day)**
+
+```{r}
+covid_per_knt <- covid_knt %>%
+  group_by(abbreviation_canton_and_fl, date) %>%
+  summarize(cumulative_cases = sum(ncumul_conf),
+            currently_hosp = sum(ncumul_hosp),
+            total_released = sum(ncumul_released),
+            total_fatalities = sum(ncumul_deceased)) %>%
+  filter(abbreviation_canton_and_fl != 'FL') %>%
+  mutate(incidence_conf = cumulative_cases - lag(cumulative_cases),
+         incidence_hosp = currently_hosp,
+         incidence_released = total_released  - lag(total_released ),
+         incidence_fatalities = total_fatalities - lag(total_fatalities)) %>%
+  replace(is.na(.), 0)
+
+## plot epi curve
+epi_cnt_plot <- covid_per_knt %>%
+  dplyr::select(date, abbreviation_canton_and_fl, incidence_conf) %>%
+  pivot_wider(names_from = abbreviation_canton_and_fl, values_from = incidence_conf) %>%
+  pivot_longer(-date, names_to = "canton", values_to = "incidence") %>% 
+
+  ggplot(aes(x=date, y=incidence)) + # geom_point() + geom_line() +
+    geom_bar(stat="identity", fill = confirmed_color) +
+    facet_wrap(canton~., scales = "free_y", ncol=4) +
+  labs(y="Daily incremental incidence",
+       x = "",
+       # title="Confirmed cases of COVID-19 per Canton of Switzerland",
+       # subtitle="Note: differing y-axis scales") +
+       title = "Note: Differing y-axis Scales") +
+    theme(legend.position = "none",
+          strip.text.y = element_text(size=7)) +
+  theme_minimal()
+
+## ggplot to plotly
+library(plotly)
+fig <- ggplotly(epi_cnt_plot)
+# fig$x$data[[1]]$xaxis <- "Date"
+fig
+```
+
+Epidemic Trajectory
+=======================================================================
+
+```{r}
+# Row
+# -----------------------------------------------------------------------
+# ### **Log-linear Model with a 95% Conf. Interval and the Epidemic Curve for Switzerland**
+  
+# Modelling the epidemic trajectory using log-linear models
+# log(y) = r*t + b
+# where y is the incidence, r is the growth rate, t is the number of days since a specific point in time (typically the start of the outbreak), and b is the intercept. Separate models are fitted to the growth and the decay parts of the epidemic (incidence data) curve.
+
+# Fitting with the 'incidence' package for R - a part of the R Epidemics Consortium
+# (RECON) suite of packages for epidemic modelling.
+# See: https://www.repidemicsconsortium.org/incidence/
+
+# library(incidence)
+# # We need to convert daily case counts into one case per row format first. The uncount() function the the tidyr package is perfect for doing that.
+# covid_count <- covid_ch %>%
+#   select(date, incidence_conf) %>%
+#   uncount(incidence_conf) %>%
+#   pull(date)
+# 
+# covid_inc_object <- incidence::incidence(covid_count)
+# incidence_fit <- incidence::fit(covid_inc_object)
+# 
+# # plot the incidence data and the model fit
+# plot(covid_inc_object) %>% add_incidence_fit(incidence_fit)
+
+
+# ## ...or the classical way...
+# covid_inc <- covid_ch %>%
+#   filter(incidence_conf > 0,
+#          date >= ymd('2020-03-01'))
+# 
+# model_log <- lm(log(incidence_conf) ~ date, data = covid_inc)
+# df_fit <- as_tibble(exp(predict(model_log, newdata = covid_inc, interval = "confidence")))
+# covid_inc <- bind_cols(covid_inc, df_fit)
+# 
+# log_lm_plot <- ggplot(covid_inc) +
+#   geom_bar(aes(x = date, y = incidence_conf), stat='identity', fill = confirmed_color) +
+#   geom_line(aes(x = date, y = fit), colour = "lightgray") +
+#   geom_line(aes(x = date, y = upr), linetype = 2, colour = "lightgray") +
+#   geom_line(aes(x = date, y = lwr), linetype = 2, colour = "lightgray") +
+#   xlab("") +
+#   ylab("Daily Incidence") +
+#   ylim(0, 2500) +
+#   theme_minimal()
+# 
+# ## ggplot to plotly
+# library(plotly)
+# fig <- ggplotly(log_lm_plot)
+# fig
+```
+
+### **Infection Trajectory with Doubling Rate References**
+
+```{r}
+library(scales)
+
+# -- Exponential Growth:
+# N(t) = N0*(1+r)t 
+# N: Amount or Number
+# N0: Initial amount or Number
+# r is the growth rate
+# t is the time elapsed
+
+# Doubling Time Model (doubling means r of 1):
+# N(t) = N0*(2)^(t/D)
+# D: The doubling time of a the amount or Number
+# t: ... in t days
+
+# Cases double every day, D=1: N(t) = N0*(2)^(t/1)
+# Cases double every 2nd day, D=2: N(t) = N0*(2)^(t/2)
+# Cases double every 3th day, D=3: N(t) = N0*(2)^(t/3)
+
+covid_ch <- covid_ch %>% 
+  mutate(double_cases_every_day = 1*2^(1:length(seq(min(date),max(date),by='day'))),
+         double_cases_every_2 = 1*2^((1:length(seq(min(date),max(date),by='day')))/2),
+         double_cases_every_3 = 1*2^((1:length(seq(min(date),max(date),by='day')))/3))
+
+# ## -- time-series forecasting model with exponential smoothing (AAN)
+# library(fable)
+# library(ggsci)
+# library(tsibble)
+# #use xx days for validation
+# val_days <- 3
+# 
+# covid_ch_ts <- covid_ch %>% 
+#   dplyr::select(date, cumulative_cases) %>% 
+#   as_tsibble(index = date) %>% 
+#   mutate(type = if_else(date > max(date) - lubridate::days(val_days),
+#                         "Validation", "Training"))
+# # Select training data
+# train_data <- covid_ch_ts %>%
+#   filter(type == "Training")
+# 
+# # Instead of filtering, we can now also anti-join on train_data
+# val_data <- covid_ch_ts %>%
+#   anti_join(train_data, by = "date") 
+# 
+# fit_ses <- train_data %>% #covid_ts %>%
+#   # model(ETS(cumulative_cases ~ error("A") + trend("A") + season("N"),
+#   #                                 opt_crit = "mse"))
+#   model(auto_ets = ETS(cumulative_cases))
+# 
+# # Model report and smoothing parameters:
+# # report(fit_ses)
+# 
+# fc_ses <- fit_ses %>% forecast(h = 7)
+# 
+# fc_plot <- covid_ch_ts %>%
+#   ggplot(aes(date, cumulative_cases)) + 
+#   geom_line(colour = confirmed_color) +
+#   geom_point(colour = confirmed_color) +
+#   autolayer(fc_ses, alpha = 0.6) +
+#   geom_line(aes(color = type), alpha = 0.8) +
+#   geom_line(aes(y = cumulative_cases, colour = "Forecast"), data = fc_ses) +
+#   geom_line(aes(y = .fitted, colour = "Fitted"), data = augment(fit_ses) %>%
+#               # skip first fitted points
+#               filter(date > ymd("2020-02-26"))) +
+#   # Doubling rate reference
+#   geom_line(aes(y = double_cases_every_day), colour = "lightgray", data = covid_ch,
+#             linetype = "dashed") +
+#   geom_line(aes(y = double_cases_every_2), colour = "lightgray", data = covid_ch,
+#             linetype = "dashed") +
+#   geom_line(aes(y = double_cases_every_3), colour = "lightgray", data = covid_ch,
+#             linetype = "dashed") +
+#   scale_x_date(date_labels  = "%d.%m.",
+#                date_minor_breaks = "1 day",
+#                date_breaks = "7 day") +
+#   scale_y_log10() +
+#   xlab("Date") +
+#   ylab("Confirmed Cases") + ggsci::scale_color_aaas()
+# ## --
+
+fc_plot <- covid_ch %>%
+  ggplot(aes(date, cumulative_cases)) + 
+  geom_line(colour = confirmed_color) +
+  geom_point(colour = confirmed_color) +
+  # Doubling rate reference
+  geom_line(aes(y = double_cases_every_day), colour = "lightgray",
+                        data = covid_ch, linetype = "dashed") +
+  geom_line(aes(y = double_cases_every_2), colour = "lightgray",
+                        data = covid_ch, linetype = "dashed") +
+  geom_line(aes(y = double_cases_every_3), colour = "lightgray",
+                        data = covid_ch, linetype = "dashed") +
+  scale_x_date(date_labels  = "%d.%m.",
+               date_minor_breaks = "1 day",
+               date_breaks = "7 day") +
+  scale_y_log10(labels = label_number(big.mark = "'")) + # format(covid_ch$cumulative_cases, big.mark = "'")
+  xlab("Date") +
+  ylab("Confirmed Cases") +
+  # labs(title = "Coronavirus COVID-19: Outbreak statistics and forecast for Switzerland",
+  #      subtitle = "A time-series forecasting model with exponential smoothing (AAN)") +
+  theme_minimal() +
+  # Zoom into the graph
+  # coord_cartesian(xlim = c(ymd(as.Date("2020-03-01")), ymd(max(fc_ses$date)))) +
+  coord_cartesian(ylim = c(1, 1e+05)) +
+  annotate("text", x=ymd("2020-03-17"), y=1e+05,
+                       label="\nCases double every day",
+                       colour="lightgray", angle=64) +
+  annotate("text", x=ymd("2020-03-18"), y=1e+03, label="\n...every 2 day",
+                       colour="lightgray", angle=44) +
+  annotate("text", x=ymd("2020-03-28"), y=1e+03, label="\n...every 3 day",
+                       colour="lightgray", angle=36) +
+  theme_minimal()
+
+## ggplot to plotly
+library(plotly)
+fig <- ggplotly(fc_plot)
+fig
+```
+
+
+```{r}
+# # Reproduction number
+# # =======================================================================
+# # ### **Estimating changes in the effective reproduction number**
+#   
+# # https://timchurches.github.io/blog/posts/2020-02-18-analysing-covid-19-2019-ncov-outbreak-data-with-r-part-1/#estimating-changes-in-the-effective-reproduction-number
+# library(EpiEstim)
+# library(incidence)
+# 
+# incids <- covid_ch %>% 
+#   mutate(I = incidence_conf) %>% 
+#   dplyr::select(date, I)
+# 
+# ## Use the mean of 2.6 days for the SI distribution, and standard deviation of 1.5 days , which is the serial interval for flu from Ferguson et al., Nature, 2005:
+# res_parametric_si <- estimate_R(incids, 
+#                                 method="parametric_si",
+#                                 config = make_config(list(
+#                                   mean_si = 2.6, 
+#                                   std_si = 1.5)))
+# 
+# # custom results plotting function to avoid the ugly
+# # TableGrob messages returned by the plotting function in the
+# # EpiEstim package
+# plot_Ri <- function(estimate_R_obj) {
+#   # plots the incidence
+#   p_I <- plot(estimate_R_obj, "incid", add_imported_cases = TRUE)
+#   # plots the serial interval distribution
+#   p_SI <- plot(estimate_R_obj, "SI")
+#   p_Ri <- plot(estimate_R_obj, "R")
+#   return(gridExtra::grid.arrange(p_I, p_SI, p_Ri, ncol = 1))
+# }
+# 
+# plot_Ri(res_parametric_si)
+# 
+# # Conveniently, the EpiEstim package lets us incorporate this uncertainty around the serial interval distribution by allowing specification of a distribution of distributions of serial intervals. So let’s retain the mean SI estimated by Li et al. of 7.5 days, with an SD of 3.4, but let’s also allow that mean SI to vary between 2.3 and 8.4 using a truncated normal distribution with an SD of 2.0. We’ll also allow the SD or the SD to vary between 0.5 and 4.0.
+# 
+# res_uncertain_si <- estimate_R(incids,
+#                                method = "uncertain_si", 
+#                                config = make_config(list(mean_si = 7.5,
+#                                                          std_mean_si = 2, 
+#                                                          min_mean_si = 1,
+#                                                          max_mean_si = 8.4,
+#                                                          std_si = 3.4,
+#                                                          std_std_si = 1, 
+#                                                          min_std_si = 0.5,
+#                                                          max_std_si = 4,
+#                                                          n1 = 1000,
+#                                                          n2 = 1000)))
+# 
+# plot_Ri(res_uncertain_si)
+```
+
+
+
+```{r}
+# SIR Modell
+# =======================================================================
+# ### **COVID-19 fitted vs observed cumulative incidence, Switzerland**
+#   
+# SIR <- function(time, state, parameters) {
+#     par <- as.list(c(state, parameters))
+#     with(par, {
+#         dS <- -beta * I * S/N
+#         dI <- beta * I * S/N - gamma * I
+#         dR <- gamma * I
+#         list(c(dS, dI, dR))
+#     })
+# }
+# 
+# # Days to train the model
+# sir_start_date <- "2020-02-25"
+# sir_end_date <- "2020-03-16"
+# 
+# Infected <- covid_ch %>%
+#   filter(date >= ymd(sir_start_date), date <= ymd(sir_end_date)) %>% 
+#     pull(cumulative_cases)
+# 
+# # Create an incrementing Day vector the same length as our
+# # cases vector
+# Day <- 1:(length(Infected))
+# 
+# # Ständige Wohnbevölkerung der CH 2018 (Quelle: Bundesamt für Statistik)
+# N <- 8544527
+# # now specify initial values for S, I and R
+# init <- c(S = N - Infected[1], I = Infected[1], R = 0)
+# 
+# # define a function to calculate the residual sum of squares
+# # (RSS), passing in parameters beta and gamma that are to be
+# # optimised for the best fit to the incidence data
+# RSS <- function(parameters) {
+#     names(parameters) <- c("beta", "gamma")
+#     out <- ode(y = init, times = Day, func = SIR, parms = parameters)
+#     fit <- out[, 3]
+#     sum((Infected - fit)^2)
+# }
+# 
+# # now find the values of beta and gamma that give the
+# # smallest RSS, which represents the best fit to the data.
+# # Start with values of 0.5 for each, and constrain them to
+# # the interval 0 to 1.0
+# Opt <- optim(c(0.5, 0.5), RSS, method = "L-BFGS-B", lower = c(0, 
+#     0), upper = c(1, 1))
+# 
+# Opt_par <- setNames(Opt$par, c("beta", "gamma"))
+# 
+# t <- 1:70
+# 
+# # get the fitted values from our SIR model
+# fitted_cumulative_incidence <- data.frame(ode(y = init, times = t,
+#                                               func = SIR, parms = Opt_par))
+# # add a Date column and join the observed incidence data
+# fitted_cumulative_incidence <- fitted_cumulative_incidence %>%
+#   mutate(date = ymd(sir_start_date) + days(t - 1)) %>%
+#   left_join(covid_ch, by = "date") %>% ## NEU
+#   mutate(training = ifelse(date > sir_end_date, "No", "Yes"))
+# 
+# # plot the data
+# sir_plot <- fitted_cumulative_incidence %>%
+#   ggplot(aes(x=date)) + geom_line(aes(y=I, colour="red")) +
+#   geom_line(aes(y=S, colour="black")) +
+#   geom_line(aes(y=R, colour="green")) +
+#   # geom_line(aes(y=I*0.1, colour="red4")) +
+#   geom_point(aes(y=cumulative_cases, colour="orange")) +
+#   # # Plätze in der Intensivpflege
+#   # geom_hline(yintercept=1500, linetype = "dotdash", colour = "gray40") +
+#   # annotate(geom='text', x=ymd("2020-04-15"),y=600, colour = "gray40",
+#   #          size = 3.5, label="Intensive Care Capacity") +
+#   scale_y_log10(labels = scales::comma,
+#                 breaks = scales::trans_breaks("log10", function(x) 10^x)) +
+#   annotation_logticks(sides="l") +
+#   labs(y="Persons") +
+#   #title="COVID-19 fitted vs observed cumulative incidence, Switzerland") + 
+#   scale_colour_manual(name = '', 
+#                       values =c('red'='red', 'black'='black', 'green'='green',
+#                                 #'red4'='red4',
+#                                 'orange'='orange'), 
+#                       labels = c('Susceptible', 'Recovered', 'Observed incidence',
+#                                  'Infectious'
+#                                  #'Requires Hospitalisation\n(10% of Infectious)'
+#                       )) +
+#   theme_bw()
+# 
+# ggplotly(sir_plot)
+```
+
+
+
+About
+=======================================================================
+
+**The Coronavirus Dashboard for Switzerland**
+
+This Coronavirus dashboard: Provides an overview of the 2019 Novel Coronavirus COVID-19 (2019-nCoV) epidemic for Switzerland. This dashboard is built with R using the R Makrdown framework. 
+<br>
+**Code**
+<br>
+The code behind this dashboard is available on [GitHub](https://github.com/...{target="_blank"}.
+<br>
+**Data**
+<br>
+The input data for this dashboard is the dataset available from the "Fachstelle Open Government Data des Kantons Zürich". <br>
+COVID-19 Cases communicated by Swiss Cantons and Principality of Liechtenstein (FL). One CSV per Canton each: https://github.com/openZH/covid_19 <br>
+Update: There is a new automated merged file available here: https://github.com/openZH/covid_19/blob/master/COVID19_Fallzahlen_CH_total.csv
+
+<br>
+*LinkedIn Profile [Mirco Heidemann](www.linkedin.com/in/mirco-heidemann)*.

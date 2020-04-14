@@ -675,17 +675,17 @@ About
 
 **The Coronavirus Dashboard for Switzerland**
 
-This Coronavirus dashboard: Provides an overview of the 2019 Novel Coronavirus COVID-19 (2019-nCoV) epidemic for Switzerland. This dashboard is built with R using the R Makrdown framework. 
-<br>
+This Coronavirus dashboard: Provides an overview of the 2019 Novel Coronavirus COVID-19 (2019-nCoV) epidemic for Switzerland. This dashboard is built with R using the R Makrdown framework. <br>
+
 **Code**
-<br>
-The code behind this dashboard is available on [GitHub](https://github.com/...{target="_blank"}.
-<br>
+
+The code behind this dashboard is available on [GitHub](https://github.com/cherry-ghost/covid19) <br>
+
 **Data**
-<br>
+
 The input data for this dashboard is the dataset available from the "Fachstelle Open Government Data des Kantons Zürich". <br>
 COVID-19 Cases communicated by Swiss Cantons and Principality of Liechtenstein (FL). One CSV per Canton each: https://github.com/openZH/covid_19 <br>
 Update: There is a new automated merged file available here: https://github.com/openZH/covid_19/blob/master/COVID19_Fallzahlen_CH_total.csv
 
 <br>
-*LinkedIn Profile [Mirco Heidemann](www.linkedin.com/in/mirco-heidemann)*.
+*LinkedIn Profile [Mirco Heidemann](https://www.linkedin.com/in/mirco-heidemann)*.
